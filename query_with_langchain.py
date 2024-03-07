@@ -16,6 +16,7 @@ from openai import AzureOpenAI, RateLimitError, APIError, InternalServerError
 import json
 from config_util import get_config_value
 from logger import logger
+from cache import MarqoSemanticCache
 
 load_dotenv()
 marqo_url = get_config_value("database", "MARQO_URL", None)
@@ -27,7 +28,7 @@ client = AzureOpenAI(
     api_key=os.environ["OPENAI_API_KEY"],
     api_version=os.environ["OPENAI_API_VERSION"]
 )
-
+cache_base = MarqoSemanticCache(marqo_url, top_k=10)
 
 def querying_with_langchain_gpt3(index_id, query, audience_type):
 
@@ -109,6 +110,11 @@ def conversation_retrieval_chain(index_id, query, session_id, context):
         logger.debug(f"intent_payload :: {intent_payload}")
         search_intent = get_intent_query(intent_payload)
         logger.info(f"search_intent :: {search_intent}")
+
+        cached_answer = cache_base.get_cached_answer(search_intent)
+        if cached_answer:
+            return cached_answer, None, 200
+        
         search_index = Marqo(marqoClient, index_id, searchable_attributes=["text"])
         top_docs_to_fetch = get_config_value("database", "top_docs_to_fetch", None)
         documents = search_index.similarity_search_with_score(search_intent, k=20)
@@ -132,6 +138,7 @@ def conversation_retrieval_chain(index_id, query, session_id, context):
         messages = read_messages_from_redis(session_id)
         messages.extend([user_message,assistant_message])
         store_messages_in_redis(session_id, messages)
+        cache_base.store_llm_response(query,response.strip(";"), search_intent)
         return response.strip(";"), None, 200
     except RateLimitError as e:
         error_message = f"OpenAI API request exceeded rate limit: {e}"
